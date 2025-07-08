@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# VPN monitor: restart OpenVPN if tun0 is down or no ping
+
+VPN_IF="{{ net_interface }}"
+PING_TARGET="8.8.8.8"
+SERVICE="{{ openvpn_service }}"
+
+if ! ip link show "$VPN_IF" &>/dev/null; then
+  echo "$(date): $VPN_IF down, restarting $SERVICE"
+  systemctl restart "$SERVICE"
+  exit
+fi
+
+if ! ping -I "$VPN_IF" -c2 -W1 "$PING_TARGET" &>/dev/null; then
+  echo "$(date): no traffic via $VPN_IF, restarting $SERVICE"
+  systemctl.restart "$SERVICE"
+fi

@@ -1,0 +1,22 @@
+# Ansible
+*.retry
+*.log
+*.bak
+
+# Python crap
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor backups
+*~
+*.swp
+
+# Shell history
+.history
+
+# General
+.env

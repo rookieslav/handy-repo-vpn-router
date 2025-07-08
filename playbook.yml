@@ -1,0 +1,183 @@
+---
+- name: Deploy VPN‑aware TCP/QUIC router on localhost
+  hosts: localhost
+  connection: local
+  become: true
+
+  vars_prompt:
+    - name: net_interface
+      prompt: "LAN interface name (e.g. eth0)"
+      private: no
+    - name: openvpn_conf
+      prompt: "Path to OpenVPN .conf file (with embedded certs)"
+      private: no
+    - name: default_gateway
+      prompt: "Your home-router IP (used to clean old VPN route)"
+      private: no
+
+  vars:
+    vpn_table_id: 100
+    vpn_table_name: vpnroute
+    vpn_mark: 1
+    redirect_port: 9443
+    vpn_upstream_port: 10001
+    direct_upstream_port: 10002
+    nginx_map_file: /etc/nginx/vpn_domains.map
+    rt_tables: /etc/iproute2/rt_tables
+    openvpn_service: openvpn-client@config
+
+  pre_tasks:
+    - name: Flush existing iptables (nat & mangle)
+      shell: |
+        iptables -t nat    -F || true
+        iptables -t mangle -F || true
+
+    - name: Remove old ip rule & routes
+      shell: |
+        ip rule del fwmark {{ vpn_mark }} table {{ vpn_table_name }} || true
+        ip route del default via {{ default_gateway }} dev tun0 table {{ vpn_table_name }} || true
+        ip route flush table {{ vpn_table_name }}                   || true
+
+    - name: Destroy old IPSet
+      shell: ipset destroy vpn_udp_cidrs || true
+
+  tasks:
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Install deps on Debian/Ubuntu
+      apt:
+        name:
+          - nginx
+          - openvpn
+          - ipset
+          - iptables-persistent
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: Install deps on Arch
+      pacman:
+        name:
+          - nginx
+          - openvpn
+          - ipset
+          - iptables
+        state: present
+        update_cache: yes
+      when: ansible_distribution == 'Archlinux'
+
+    - name: Install deps on AlmaLinux/RHEL
+      dnf:
+        name:
+          - nginx
+          - openvpn
+          - ipset
+          - iptables
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Copy OpenVPN config
+      copy:
+        src: "{{ openvpn_conf }}"
+        dest: /etc/openvpn/client/config.conf
+        owner: root
+        mode: '0600'
+
+    - name: Enable & start OpenVPN
+      systemd:
+        name: "{{ openvpn_service }}"
+        enabled: yes
+        state: started
+
+    - name: Ensure vpnrouting table entry
+      lineinfile:
+        path: "{{ rt_tables }}"
+        line: "{{ vpn_table_id }} {{ vpn_table_name }}"
+        create: yes
+
+    - name: Add ip rule for marked packets
+      command: ip rule add fwmark {{ vpn_mark }} table {{ vpn_table_name }}
+      ignore_errors: true
+
+    - name: Add default route via tun0
+      command: ip route add default dev tun0 table {{ vpn_table_name }}
+      ignore_errors: true
+
+    - name: Create IPSet for UDP CIDRs
+      command: ipset create vpn_udp_cidrs hash:net
+      ignore_errors: true
+
+    - name: Populate vpn_udp_cidrs from udp_cidrs.txt
+      shell: |
+        while read cidr; do
+          ipset add vpn_udp_cidrs $cidr -exist
+        done < udp_cidrs.txt
+
+    - name: Deploy nginx.conf
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Deploy vpn_domains.map
+      template:
+        src: templates/vpn_domains.map.j2
+        dest: "{{ nginx_map_file }}"
+        owner: root
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Redirect TCP 80/443 → Nginx
+      iptables:
+        table: nat
+        chain: PREROUTING
+        in_interface: "{{ net_interface }}"
+        protocol: tcp
+        destination_port: "{{ item }}"
+        jump: REDIRECT
+        to_ports: "{{ redirect_port }}"
+      loop:
+        - 80
+        - 443
+
+    - name: Mark Nginx‑VPN upstream traffic (TCP)
+      command: >
+        iptables -t mangle -A PREROUTING
+        -i lo -p tcp --dport {{ vpn_upstream_port }}
+        -j MARK --set-mark {{ vpn_mark }}
+      args:
+        creates: /etc/ansible/marker-tcp-mark
+
+    - name: Mark UDP‑443 to IPSet for VPN (UDP)
+      command: >
+        iptables -t mangle -A PREROUTING
+        -i {{ net_interface }} -p udp --dport 443
+        -m set --match-set vpn_udp_cidrs dst
+        -j MARK --set-mark {{ vpn_mark }}
+      args:
+        creates: /etc/ansible/marker-udp-mark
+
+    - name: Deploy VPN monitor script
+      template:
+        src: templates/vpn_monitor.sh.j2
+        dest: /usr/local/bin/vpn_monitor.sh
+        owner: root
+        mode: '0755'
+
+    - name: Schedule VPN monitor cron
+      cron:
+        name: "VPN monitor every minute"
+        minute: "*/1"
+        job: "/usr/local/bin/vpn_monitor.sh"
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

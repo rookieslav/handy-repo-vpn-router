@@ -1,0 +1,4 @@
+# Generated from domains.txt
+{% for domain in lookup('file', 'domains.txt').splitlines() %}
+~^(.+\.)?{{ domain | regex_replace('\\.', '\\\\.') }}$    1;
+{% endfor %}

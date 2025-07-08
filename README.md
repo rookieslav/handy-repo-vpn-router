@@ -19,6 +19,10 @@ This project turns any Linux machine into a smart VPN router that:
 
 ## 🧰 Requirements
 
+- Ansible
+- Make
+- Openvpn client config
+
 | Host Distro | Install Command |
 | --- | --- |
 | Debian/Ubuntu | `sudo apt install ansible make` |
